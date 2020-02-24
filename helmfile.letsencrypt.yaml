@@ -1,0 +1,125 @@
+repositories:
+- name: stable
+  url: https://kubernetes-charts.storage.googleapis.com
+- name: jetstack
+  url: https://charts.jetstack.io
+
+releases:
+- name: nginx-ingress
+  namespace: nginx-ingress
+  chart: stable/nginx-ingress
+  values:
+  - rbac:
+      create: true
+    controller:
+      extraArgs:
+        enable-ssl-passthrough: ""
+        tcp-services-configmap: nginx-ingress/tcp-services
+      config:
+        hsts: "false"
+- name: spinnaker
+  namespace: spinnaker
+  chart: stable/spinnaker
+  labels:
+    app: spinnaker
+  values:
+  - halyard:
+      spinnakerVersion: 1.18.3
+      image:
+        tag: 1.31.1
+      additionalSecrets:
+        create: true
+        data:
+          keystore.p12: |-
+{{ requiredEnv "SAMLP12" | indent 12 }}
+          password.txt: {{ requiredEnv "PASS" }}
+          metadata.xml: {{ requiredEnv "METADATA" }}
+          gate.jks: {{ requiredEnv "GATE_JKS" }}
+      additionalConfigMaps:
+        create: true
+        data:
+          config.src: |-
+            KEYSTORE_ALIAS=saml # Alias in the keystore for the cert
+            GATE_URL="https://gate.spinnaker.DOMAIN.com"
+            DECK_URL="https://spinnaker.DOMAIN.com"
+            # SAML
+            KEYSTORE_FILE=/opt/halyard/additionalSecrets/keystore.p12
+            PASSWORD_FILE=/opt/halyard/additionalSecrets/password.txt
+            METADATA_FILE=/opt/halyard/additionalSecrets/metadata.xml
+            # SSL
+            GATE_JKS_PATH=/opt/halyard/additionalSecrets/gate.jks
+      additionalProfileConfigMaps:
+        data:
+          gate-local.yml: |-
+            default:
+              apiPort: 8085
+              legacyServerPort: 8084
+            server:
+              port: 9002
+      additionalScripts:
+        create: true
+        data:
+          configure_saml.sh: |
+            source /opt/halyard/additionalConfigMaps/config.src
+            KEYSTORE_PASSWORD="$( cat "$PASSWORD_FILE" )"
+            $HAL_COMMAND config security ui edit --override-base-url "$DECK_URL"
+            $HAL_COMMAND config security api edit --override-base-url "$GATE_URL"
+            $HAL_COMMAND config security authn saml edit \
+              --keystore "$KEYSTORE_FILE" \
+              --keystore-alias "$KEYSTORE_ALIAS" \
+              --keystore-password "$KEYSTORE_PASSWORD" \
+              --metadata "$METADATA_FILE" \
+              --issuer-id "spinnaker.prod" \
+              --no-validate \
+              --service-address-url "$GATE_URL"
+            $HAL_COMMAND config security authn saml enable
+          configure_ssl.sh: |
+            source /opt/halyard/additionalConfigMaps/config.src
+            $HAL_COMMAND config security ui edit --override-base-url "$DECK_URL"
+            $HAL_COMMAND config security api edit --override-base-url "$GATE_URL"
+            $HAL_COMMAND config security api ssl edit \
+              --key-alias gate \
+              --keystore ${GATE_JKS_PATH} \
+              --keystore-password "PASSWORD" \
+              --keystore-type jks \
+              --truststore ${GATE_JKS_PATH} \
+              --truststore-password "PASSWORD" \
+              --truststore-type jks
+            $HAL_COMMAND config security api ssl enable
+          configure_x509.sh: |
+            $HAL_COMMAND config security authn x509 edit --role-oid 1.2.840.10070.8.1
+            $HAL_COMMAND config security api ssl edit --client-auth WANT
+            $HAL_COMMAND config security authn x509 enable
+    ingress:
+      enabled: true
+      host: spinnaker.DOMAIN.com
+      annotations:
+        ingress.kubernetes.io/ssl-redirect: 'true'
+        kubernetes.io/ingress.class: nginx
+        kubernetes.io/tls-acme: "true"
+        cert-manager.io/cluster-issuer: letsencrypt-production
+      tls:
+      - hosts:
+        - spinnaker.DOMAIN.com
+        secretName: deck-tls
+    ingressGate:
+      enabled: true
+      host: gate.spinnaker.DOMAIN.com
+      annotations:
+        ingress.kubernetes.io/ssl-redirect: 'true'
+        kubernetes.io/ingress.class: nginx
+        kubernetes.io/tls-acme: "true"
+        cert-manager.io/cluster-issuer: letsencrypt-production
+      tls:
+      - hosts:
+        - gate.spinnaker.DOMAIN.com
+        secretName: gate-tls
+- name: cert-manager
+  namespace: cert-manager
+  version: v0.13.1
+  labels:
+    app: cert-manager
+  chart: jetstack/cert-manager
+  values:
+  - prometheus:
+      enabled: false
